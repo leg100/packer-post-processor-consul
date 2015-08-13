@@ -10,7 +10,21 @@ import (
         "github.com/hashicorp/consul/api"
 	"github.com/mitchellh/packer/common"
 	"github.com/mitchellh/packer/packer"
+	"github.com/mitchellh/packer/helper/config"
+	"github.com/mitchellh/packer/template/interpolate"
 )
+
+const BuildEnvKey = "CONSUL_BUILD_ID"
+
+// Artifacts can return a string for this state key and the post-processor
+// will use automatically use this as the type. The user's value overrides
+// this if `artifact_type_override` is set to true.
+const ArtifactStateType = "consul.artifact.type"
+
+// Artifacts can return a map[string]string for this state key and this
+// post-processor will automatically merge it into the metadata for any
+// uploaded artifact versions.
+const ArtifactStateMetadata = "consul.artifact.metadata"
 
 var builtins = map[string]string{
 	"mitchellh.amazonebs": "amazonebs",
@@ -19,6 +33,11 @@ var builtins = map[string]string{
 
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
+
+	Artifact     string
+	Type         string `mapstructure:"artifact_type"`
+	TypeOverride bool   `mapstructure:"artifact_type_override"`
+	Metadata     map[string]string
 
 	AwsAccessKey     string `mapstructure:"aws_access_key"`
 	AwsSecretKey     string `mapstructure:"aws_secret_key"`
@@ -30,7 +49,12 @@ type Config struct {
 	ProjectName      string `mapstructure:"project_name"`
 	ProjectVersion   string `mapstructure:"project_version"`
 
-	tpl *packer.ConfigTemplate
+	// This shouldn't ever be set outside of unit tests.
+	Test bool `mapstructure:"test"`
+
+	ctx        interpolate.Context
+	user, name string
+	buildId    int
 }
 
 type PostProcessor struct {
@@ -40,38 +64,20 @@ type PostProcessor struct {
 }
 
 func (p *PostProcessor) Configure(raws ...interface{}) error {
-	_, err := common.DecodeConfig(&p.config, raws...)
+	err := config.Decode(&p.config, &config.DecodeOpts{
+		Interpolate:        true,
+		InterpolateContext: &p.config.ctx,
+		InterpolateFilter: &interpolate.RenderFilter{
+			Exclude: []string{},
+		},
+	}, raws...)
 	if err != nil {
 		return err
-	}
-
-	p.config.tpl, err = packer.NewConfigTemplate()
-	if err != nil {
-		return err
-	}
-	p.config.tpl.UserVars = p.config.PackerUserVars
-
-	templates := map[string]*string{
-		"consul_address":    &p.config.ConsulAddress,
-		"consul_scheme":     &p.config.ConsulScheme,
-		"consul_token":      &p.config.ConsulToken,
-		"aws_access_key":    &p.config.AwsAccessKey,
-		"aws_secret_key":    &p.config.AwsSecretKey,
-		"aws_token":         &p.config.AwsToken,
-		"project_name":      &p.config.ProjectName,
-                "project_version":   &p.config.ProjectVersion,
-	}
-
-	errs := new(packer.MultiError)
-	for key, ptr := range templates {
-		*ptr, err = p.config.tpl.Process(*ptr, nil)
-		if err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("Error processing %s: %s", key, err))
-		}
 	}
 
 	required := map[string]*string{
+		"artifact":      &p.config.Artifact,
+		"artifact_type": &p.config.Type,
 		"consul_address":      &p.config.ConsulAddress,
 		"aws_access_key":      &p.config.AwsAccessKey,
 		"aws_secret_key":      &p.config.AwsSecretKey,
@@ -79,6 +85,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
                 "project_version":     &p.config.ProjectVersion,
 	}
 
+	var errs *packer.MultiError
 	for key, ptr := range required {
 		if *ptr == "" {
 			errs = packer.MultiErrorAppend(
@@ -86,7 +93,7 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 		}
 	}
 
-	if len(errs.Errors) > 0 {
+	if errs != nil && len(errs.Errors) > 0 {
 		return errs
 	}
 
@@ -98,6 +105,25 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 	if p.config.AwsToken != "" {
 		p.config.AwsToken = p.auth.Token
 	}
+
+  config := api.DefaultConfig()
+  config.Address = p.config.ConsulAddress
+  //config.Datacenter = parts[0]
+
+  if p.config.ConsulScheme != "" {
+    config.Scheme = p.config.ConsulScheme
+  }
+
+  if p.config.ConsulToken != "" {
+    config.Token = p.config.ConsulToken
+  }
+
+  p.client, err = api.NewClient(config)
+  if err != nil {
+    errs = packer.MultiErrorAppend(
+      errs, fmt.Errorf("Error initializing consul client: %s", err))
+    return errs
+  }
 
 	return nil
 }

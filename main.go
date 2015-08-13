@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/bhourigan/post-processor-consul/consul"
+	"github.com/leg100/post-processor-consul/consul"
 	"github.com/mitchellh/packer/packer/plugin"
 )
 
