@@ -1,2 +1,4 @@
 packer-post-processor-consul
 *.swp
+.idea/
+*.iml
